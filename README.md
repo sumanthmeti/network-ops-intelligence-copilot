@@ -11,7 +11,7 @@ flowchart LR
   S3f -.-> SM[SageMaker training job]
   Exp --> Model[champion model]
   SM -.-> EP[SageMaker serverless endpoint]
-  Model --> API[FastAPI on Kubernetes]
+  Model --> API[FastAPI service]
   EP -.-> API
   API --> Agent[LangGraph agent<br/>detect → triage → report → validate]
   Agent -.-> BR[Bedrock Claude]
@@ -24,15 +24,15 @@ Solid lines run today. Dotted lines are written and wired but blocked by the AWS
 | Phase | Component | Status |
 |---|---|---|
 | 1 | Telemetry simulator + PySpark features | **Done.** Runs locally and on AWS Glue. |
-| 2 | Terraform: S3, least-privilege IAM, Glue job | **Done, deployed.** 11 resources; IAM limits verified with the policy simulator. |
+| 2 | Terraform: S3, least-privilege IAM, Glue job | **Done, deployed.** 11 resources (S3 bucket, 2 IAM roles, Glue job definition); IAM limits verified with the policy simulator. Nothing runs continuously: Glue only runs when a job is started. |
 | 3 | Model + MLflow tracking and registry | **Done.** 6 candidates tracked; champion registered and reloaded from the registry. |
 | 3 | SageMaker training + serverless endpoint | **Code written, not run.** Account quotas are 0 and the Free plan blocks SageMaker compute (`ResourceLimitExceeded`). |
 | 4 | LangGraph agent + Pydantic retry loop | **Done.** 18 tests; runs over real test-day alerts. |
 | 4 | Bedrock Claude call | **Code written, not run.** Free plan: `anthropic.claude-opus-5 is not available for this account`. Demos use a clearly labeled offline template in its place. |
-| 5 | FastAPI service | **Done.** Served with uvicorn and smoke-tested over HTTP. |
-| 5 | Docker image + Kubernetes manifests | **Written.** Not yet built on the laptop (Docker Desktop not installed yet); CI builds and deploys them. |
+| 5 | FastAPI service | **Done.** Runs locally with uvicorn; smoke-tested over HTTP. Not hosted in AWS. |
+| 5 | Docker image + Kubernetes manifests | **Written, not built or deployed yet.** `Dockerfile` and `k8s/` are in place for a later step. |
 | 6 | A/B test | **Done.** Router-randomized, stratified analysis, A/A-validated. |
-| 7 | GitHub Actions CI/CD | **Written.** Runs once the repo is pushed to GitHub. |
+| 7 | GitHub Actions CI | **Written.** Runs once the repo is pushed to GitHub. No image build or deploy step yet. |
 
 Account note: after one successful Glue run, AWS started returning
 `Account ... is denied access` on `StartJobRun`, an account-level Free-plan restriction.
@@ -161,10 +161,10 @@ On every push or PR, the pipeline:
 1. runs the unit tests;
 2. rebuilds everything from scratch (generate → Spark → MLflow experiment → calendar → A/B test);
 3. runs integration tests with the freshly trained model;
-4. builds the image and smoke-tests the container;
-5. deploys to an ephemeral **kind** Kubernetes cluster, waits for rollout, calls the Service, and verifies that a rolling restart keeps it up.
+4. starts the API with uvicorn and sends it real test-day requests;
+5. uploads the trained model and results as a build artifact.
 
-On `main` it also pushes the image to GHCR, tagged with the commit SHA.
+Planned later: build the Docker image and deploy to Kubernetes from CI.
 
 ---
 
@@ -190,7 +190,7 @@ python spark_jobs/run_glue_job.py
 python ml/sagemaker_deploy.py train | deploy | invoke | delete   # needs SageMaker quota / Paid plan
 ```
 
-Docker + Kubernetes (Docker Desktop with Kubernetes enabled):
+Docker + Kubernetes (later step, not yet tested; needs Docker Desktop with Kubernetes enabled):
 ```bash
 docker build -t noc-copilot-api:latest .
 kubectl apply -f k8s/config.yaml && kubectl apply -f k8s/deployment.yaml -f k8s/service.yaml
