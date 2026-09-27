@@ -1,0 +1,21 @@
+.venv/
+__pycache__/
+*.pyc
+.pytest_cache/
+
+# Generated data -- reproducible from the scripts, too large for git
+data/raw/
+data/features/
+
+# Spark / Hadoop local artifacts
+spark-warehouse/
+metastore_db/
+derby.log
+*.crc
+
+# Terraform (Phase 2)
+.terraform/
+*.tfstate
+*.tfstate.*
+*.tfvars
+tfplan

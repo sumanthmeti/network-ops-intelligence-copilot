@@ -1,0 +1,12 @@
+# Phase 1: data + Spark
+numpy>=1.26
+pandas>=2.2,<3        # PySpark 3.5 predates pandas 3
+pyarrow>=15
+pyspark==3.5.3        # 3.5 supports Java 8/11/17; Spark 4 requires Java 17+
+setuptools            # PySpark 3.5 imports distutils, removed in Python 3.12
+
+# Tests
+pytest>=8
+
+# AWS (Phase 2+)
+boto3>=1.34
