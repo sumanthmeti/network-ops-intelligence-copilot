@@ -140,6 +140,8 @@ def main() -> None:
     p.add_argument("--short-window-minutes", type=int, default=15)
     p.add_argument("--master", default=None, help="e.g. local[*]; omit on EMR/spark-submit")
     p.add_argument("--shuffle-partitions", type=int, default=16)
+    p.add_argument("--write-via-pandas", action="store_true",
+                   help="Windows laptops without winutils.exe only; see comment in main()")
     # parse_known_args, not parse_args: AWS Glue appends its own arguments
     # (--JOB_ID, --JOB_RUN_ID, --job-bookmark-option, ...) to every run.
     a, _ = p.parse_known_args()
@@ -150,9 +152,24 @@ def main() -> None:
 
     raw = spark.read.parquet(a.input)
     features = build_features(raw, a.window_minutes, a.short_window_minutes)
-    features.write.mode("overwrite").partitionBy("date").parquet(a.output)
+    if a.write_via_pandas:
+        # Windows-only escape hatch: Hadoop's local file writer needs winutils.exe.
+        # Collect to the driver via Arrow and let pyarrow write the same date-partitioned
+        # layout. Fine for a laptop-sized dataset; at production scale collecting to the
+        # driver is exactly what you must NOT do -- use Glue (infra/glue.tf) or Linux.
+        import shutil
+        shutil.rmtree(a.output, ignore_errors=True)
+        spark.conf.set("spark.sql.execution.arrow.pyspark.enabled", "true")
+        pdf = features.toPandas()
+        pdf["date"] = pdf["date"].astype(str)
+        pdf.to_parquet(a.output, partition_cols=["date"], index=False,
+                       coerce_timestamps="us", allow_truncated_timestamps=True)
+    else:
+        features.write.mode("overwrite").partitionBy("date").parquet(a.output)
 
-    out = spark.read.parquet(a.output)
+    # Normally read back what was written (proves the output is readable). In the
+    # Windows escape-hatch mode Hadoop can't list local dirs either, so summarise in memory.
+    out = features if a.write_via_pandas else spark.read.parquet(a.output)
     n = out.count()
     print(f"Wrote {n:,} rows, {len(out.columns)} columns -> {a.output} in {time.time() - t0:.1f}s")
     print("Mean |z| by anomaly type (sanity check -- anomalies should be far from 0):")

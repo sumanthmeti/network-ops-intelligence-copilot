@@ -41,8 +41,19 @@ def test_metric_ranges(df):
     assert (df["route_flap_count"] >= 0).all()
 
 
-def test_healthy_rows_are_established(df):
-    assert (df.loc[~df["is_anomaly"], "bgp_session_state"] == "Established").all()
+def test_healthy_rows_are_established_except_maintenance(df):
+    healthy = df[~df["is_anomaly"] & (df["benign_event"] != "maintenance")]
+    assert (healthy["bgp_session_state"] == "Established").all()
+
+
+def test_benign_events_never_overlap_incidents(df):
+    assert df.loc[df["is_anomaly"], "benign_event"].isna().all()
+    assert {"microburst", "traffic_surge", "maintenance"} <= set(df["benign_event"].dropna())
+
+
+def test_maintenance_happens_in_night_window(df):
+    hours = df.loc[df["benign_event"] == "maintenance", "timestamp"].dt.hour
+    assert hours.max() < 5
 
 
 def test_anomalies_actually_move_their_metric(df):

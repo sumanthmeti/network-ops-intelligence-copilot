@@ -13,6 +13,12 @@ doesn't go down for exactly one 5-minute sample. Every anomalous row is labeled
 with is_anomaly / anomaly_type / episode_id so the Phase 3 model and the Phase 6
 A/B test have ground truth to score against.
 
+Benign look-alikes are injected too (micro-bursts, traffic surges, night-time planned
+maintenance) and labeled in `benign_event`. They are NOT incidents; they are what
+makes false positives happen, as on a real network. Anomaly severity also varies per
+episode, so some incidents are subtle. Without both, any detector scores ~99% and
+the evaluation proves nothing.
+
 Defaults (200 routers, 7 days, 5-minute interval) produce 403,200 rows.
 
 Usage:
@@ -56,6 +62,10 @@ class Config:
     episodes_per_router_day: float = 0.25
     min_episode_intervals: int = 3
     max_episode_intervals: int = 18
+    # Benign look-alikes (not incidents), expected count per router per day.
+    microbursts_per_router_day: float = 4.0
+    surges_per_router_day: float = 0.3
+    maintenance_per_router_day: float = 0.08
     seed: int = 42
 
 
@@ -89,7 +99,25 @@ def generate(cfg: Config) -> pd.DataFrame:
     # Diurnal load curve: trough ~04:00, peak ~16:00, range roughly 0.55x..1.45x.
     diurnal = 1.0 + 0.45 * np.sin(2 * np.pi * (hour - 10.0) / 24.0)
     util = meta["base_util"].to_numpy()[:, None] * diurnal[None, :]
-    util = np.clip(util * rng.normal(1.0, 0.05, (R, T)), 0.01, 0.98)
+    util = util * rng.normal(1.0, 0.05, (R, T))
+
+    # Benign events: things that LOOK anomalous but are not incidents. Without these
+    # the dataset is unrealistically clean (any detector scores ~99%) and there are no
+    # false positives worth comparing in the A/B test. Labeled in `benign_event` so we
+    # can attribute false alerts to a cause; the model never sees this column.
+    benign_event = np.full((R, T), None, dtype=object)
+    steps_per_day = int(24 * 60 / cfg.interval_minutes)
+
+    # Traffic surge (flash crowd, backup job): legit load increase. Latency rises with
+    # it through the queueing term below, so it can mimic a latency problem.
+    for r in range(R):
+        for _ in range(rng.poisson(cfg.surges_per_router_day * cfg.days)):
+            dur = int(rng.integers(6, 25))
+            start = int(rng.integers(0, T - dur))
+            util[r, start:start + dur] *= rng.uniform(1.3, 1.8)
+            benign_event[r, start:start + dur] = "traffic_surge"
+
+    util = np.clip(util, 0.01, 0.98)
     traffic = util * meta["capacity"].to_numpy()[:, None]
 
     # Latency rises non-linearly as links approach saturation (queueing delay).
@@ -106,6 +134,30 @@ def generate(cfg: Config) -> pd.DataFrame:
     anomaly_type = np.full((R, T), None, dtype=object)
     episode_id = np.full((R, T), -1, dtype=np.int64)
 
+    # Micro-burst: a single sample of high latency from momentary queueing. Very
+    # common on busy links, gone by the next sample, nobody should be paged for it.
+    n_bursts = rng.poisson(cfg.microbursts_per_router_day * cfg.days, R)
+    for r in range(R):
+        idx = rng.integers(0, T, n_bursts[r])
+        latency[r, idx] *= rng.uniform(1.8, 3.5, n_bursts[r])
+        benign_event[r, idx] = "microburst"
+
+    # Planned maintenance: engineer resets a BGP session in the night window
+    # (00:00-04:00). Looks exactly like a short session_down, but it's on the change
+    # calendar. A detector without that context will page for it.
+    for r in range(R):
+        for _ in range(rng.poisson(cfg.maintenance_per_router_day * cfg.days)):
+            day = int(rng.integers(0, int(cfg.days)))
+            dur = int(rng.integers(1, 3))
+            start = day * steps_per_day + int(rng.integers(0, 4 * steps_per_day // 24))
+            if start + dur > T:
+                continue
+            sl = slice(start, start + dur)
+            bgp_state[r, sl] = "Idle"
+            traffic[r, sl] *= rng.uniform(0.0, 0.1, dur)
+            flaps[r, start] += 1
+            benign_event[r, sl] = "maintenance"
+
     # --- Inject labeled anomaly episodes ---------------------------------------
     n_episodes = rng.poisson(cfg.episodes_per_router_day * cfg.days, R)
     next_episode = 0
@@ -116,13 +168,15 @@ def generate(cfg: Config) -> pd.DataFrame:
             sl = slice(start, start + dur)
             kind = ANOMALY_TYPES[rng.integers(len(ANOMALY_TYPES))]
 
+            # Severity varies per episode: some incidents are glaring, some are subtle
+            # (a 1.6x latency rise is real degradation but overlaps with micro-bursts).
             if kind == "latency_spike":
-                latency[r, sl] *= rng.uniform(3.0, 8.0, dur)
+                latency[r, sl] *= rng.uniform(1.6, 6.0) * rng.uniform(0.9, 1.1, dur)
             elif kind == "packet_loss_burst":
-                packet_loss[r, sl] = rng.uniform(2.0, 15.0, dur)
+                packet_loss[r, sl] = rng.uniform(0.4, 12.0) * rng.uniform(0.7, 1.3, dur)
                 latency[r, sl] *= rng.uniform(1.1, 1.6, dur)  # retransmits add delay
             elif kind == "route_flap_storm":
-                flaps[r, sl] = rng.integers(8, 50, dur)
+                flaps[r, sl] = rng.integers(3, 40, dur)
                 bgp_state[r, sl] = rng.choice(BGP_FLAPPING_STATES, dur)
                 latency[r, sl] *= rng.uniform(1.3, 2.5, dur)  # reconvergence
                 packet_loss[r, sl] += rng.uniform(0.3, 3.0, dur)
@@ -134,6 +188,7 @@ def generate(cfg: Config) -> pd.DataFrame:
 
             anomaly_type[r, sl] = kind
             episode_id[r, sl] = next_episode
+            benign_event[r, sl] = None  # a real incident overrides any benign label
             next_episode += 1
 
     # --- Flatten to long format (one row per router per timestamp) -------------
@@ -150,6 +205,7 @@ def generate(cfg: Config) -> pd.DataFrame:
             "traffic_mbps": traffic.ravel().round(2),
             "anomaly_type": anomaly_type.ravel(),
             "episode_id": episode_id.ravel(),
+            "benign_event": benign_event.ravel(),
         }
     )
     df["is_anomaly"] = df["anomaly_type"].notna()
@@ -187,6 +243,8 @@ def main() -> None:
     print(f"Anomalous rows: {df['is_anomaly'].sum():,} ({df['is_anomaly'].mean():.2%}), "
           f"episodes: {df.loc[df['is_anomaly'], 'episode_id'].nunique():,}")
     print(df.loc[df["is_anomaly"]].groupby("anomaly_type")["episode_id"].nunique().to_string())
+    print("Benign look-alike rows:")
+    print(df["benign_event"].value_counts().to_string())
 
 
 if __name__ == "__main__":

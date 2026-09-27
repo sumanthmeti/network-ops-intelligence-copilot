@@ -1,0 +1,3 @@
+# Installed by the SageMaker scikit-learn container at job start (shipped as requirements.txt
+# inside sourcedir.tar.gz). scikit-learn, pandas, numpy and joblib are already in the image.
+pyarrow
