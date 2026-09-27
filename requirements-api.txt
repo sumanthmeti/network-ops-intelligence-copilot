@@ -1,0 +1,14 @@
+# Runtime dependencies of the API container only (no Spark, MLflow or test tooling).
+# Exact pins: a pickled scikit-learn model must be loaded by the same scikit-learn
+# version that trained it, and the image must be reproducible.
+fastapi==0.141.1
+uvicorn==0.54.0
+pydantic==2.13.5
+langgraph==1.2.12
+pandas==2.3.3
+numpy==2.5.3
+scikit-learn==1.9.1
+joblib==1.6.0
+anthropic==1.8.0
+boto3==1.43.103
+pyarrow==25.0.1

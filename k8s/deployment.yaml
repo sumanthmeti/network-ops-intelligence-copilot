@@ -1,0 +1,55 @@
+# Deployment: keeps N identical pods of the API running and replaces them on updates.
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: noc-copilot-api
+  namespace: noc-copilot
+  labels: {app: noc-copilot-api}
+spec:
+  replicas: 2                       # two pods: one can die or be updated while the other serves
+  selector:
+    matchLabels: {app: noc-copilot-api}   # which pods this Deployment owns
+  strategy:
+    type: RollingUpdate
+    rollingUpdate:
+      maxUnavailable: 0             # never drop below 2 ready pods during a deploy
+      maxSurge: 1                   # bring up 1 new pod, wait until ready, then remove an old one
+  template:
+    metadata:
+      labels: {app: noc-copilot-api}      # the Service selects pods by this label
+    spec:
+      securityContext:
+        runAsNonRoot: true          # refuse to start if the image would run as root
+        runAsUser: 10001
+      containers:
+        - name: api
+          image: noc-copilot-api:latest
+          # Local cluster (Docker Desktop / kind) uses the locally built image. With a
+          # registry you'd use an immutable tag (git SHA) and IfNotPresent / Always.
+          imagePullPolicy: IfNotPresent
+          ports:
+            - containerPort: 8000
+          envFrom:
+            - configMapRef: {name: noc-copilot-config}
+          resources:
+            requests: {cpu: 100m, memory: 256Mi}   # what the scheduler reserves on a node
+            limits: {cpu: 500m, memory: 512Mi}     # hard cap; exceeding memory = OOMKilled
+          # Readiness: only send traffic once the model is loaded.
+          readinessProbe:
+            httpGet: {path: /readyz, port: 8000}
+            initialDelaySeconds: 5
+            periodSeconds: 5
+          # Liveness: restart the container if the process hangs.
+          livenessProbe:
+            httpGet: {path: /healthz, port: 8000}
+            initialDelaySeconds: 15
+            periodSeconds: 10
+            failureThreshold: 3
+          securityContext:
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
+          volumeMounts:
+            - {name: tmp, mountPath: /tmp}         # writable scratch, since root fs is read-only
+      volumes:
+        - name: tmp
+          emptyDir: {}

@@ -1,0 +1,98 @@
+name: ci-cd
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+# Least privilege for the automatic GITHUB_TOKEN: read the code, and write packages
+# only so the main-branch build can push the image to GitHub Container Registry.
+permissions:
+  contents: read
+  packages: write
+
+concurrency:              # a newer push cancels the older still-running pipeline
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  build-test-deploy:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: pip
+
+      - uses: actions/setup-java@v4       # Spark runs on the JVM
+        with:
+          distribution: temurin
+          java-version: "17"
+
+      - name: Install dependencies
+        run: pip install -r requirements.txt
+
+      - name: Unit tests
+        run: pytest -q
+
+      # ---- rebuild every artifact from scratch: proves the pipeline is reproducible ----
+      - name: Generate telemetry
+        run: python data/generate_telemetry.py
+      - name: Spark feature engineering (native Parquet write on Linux)
+        run: python spark_jobs/feature_engineering.py --master "local[*]"
+      - name: Train, compare and register models (MLflow)
+        run: python ml/experiment.py
+      - name: Build change calendar
+        run: python -m agent.change_calendar
+      - name: A/B test
+        run: python ab_test/run_ab_test.py
+      - name: Integration tests with the freshly trained model
+        run: pytest -q tests/test_api.py
+
+      # ---- container ----------------------------------------------------------------
+      - name: Build image
+        run: docker build -t noc-copilot-api:${{ github.sha }} -t noc-copilot-api:latest .
+
+      - name: Smoke-test the container
+        run: |
+          docker run -d --name api -p 8000:8000 noc-copilot-api:latest
+          for i in $(seq 1 30); do curl -sf localhost:8000/readyz && break; sleep 2; done
+          curl -sf localhost:8000/readyz
+          python scripts/smoke_request.py http://localhost:8000
+          docker rm -f api
+
+      # ---- deploy to an ephemeral Kubernetes cluster and exercise it ----------------------
+      - name: Create kind cluster
+        uses: helm/kind-action@v1
+        with:
+          cluster_name: ci
+      - name: Deploy to kind
+        run: |
+          kind load docker-image noc-copilot-api:latest --name ci
+          kubectl apply -f k8s/config.yaml
+          kubectl apply -f k8s/deployment.yaml -f k8s/service.yaml
+          kubectl -n noc-copilot rollout status deployment/noc-copilot-api --timeout=180s
+          kubectl -n noc-copilot get pods -o wide
+      - name: Call the service through Kubernetes
+        run: |
+          kubectl -n noc-copilot port-forward svc/noc-copilot-api 8080:80 &
+          sleep 5
+          python scripts/smoke_request.py http://localhost:8080
+      - name: Rolling update keeps the service up
+        run: |
+          kubectl -n noc-copilot rollout restart deployment/noc-copilot-api
+          kubectl -n noc-copilot rollout status deployment/noc-copilot-api --timeout=180s
+
+      # ---- publish (main branch only) --------------------------------------------------
+      - name: Push image to GHCR
+        if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+        run: |
+          IMAGE=ghcr.io/$(echo "${{ github.repository_owner }}" | tr '[:upper:]' '[:lower:]')/noc-copilot-api
+          echo "${{ secrets.GITHUB_TOKEN }}" | docker login ghcr.io -u "${{ github.actor }}" --password-stdin
+          docker tag noc-copilot-api:latest $IMAGE:${{ github.sha }}
+          docker tag noc-copilot-api:latest $IMAGE:latest
+          docker push $IMAGE:${{ github.sha }}
+          docker push $IMAGE:latest

@@ -1,0 +1,19 @@
+# Namespace: isolates this project's resources in the cluster.
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: noc-copilot
+---
+# ConfigMap: non-secret configuration, injected as env vars (envFrom in the Deployment).
+# Changing it and restarting pods reconfigures the app without rebuilding the image.
+# Secrets (e.g. AWS credentials for Bedrock) would go in a Secret, or better, come from
+# a cloud IAM role bound to the pod's service account (IRSA on EKS), never here.
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: noc-copilot-config
+  namespace: noc-copilot
+data:
+  LLM_BACKEND: "offline"       # "bedrock" once the AWS account has Bedrock access
+  DETECTOR_BACKEND: "local"    # "sagemaker" to call the SageMaker endpoint instead
+  AWS_REGION: "us-east-1"

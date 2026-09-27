@@ -1,0 +1,18 @@
+# Service: one stable address in front of the changing set of pods.
+# Pods get new IPs every time they're replaced; the Service load-balances across
+# whichever pods currently match the selector AND pass their readiness probe.
+apiVersion: v1
+kind: Service
+metadata:
+  name: noc-copilot-api
+  namespace: noc-copilot
+spec:
+  # NodePort exposes the Service on a port of every node, so the local cluster is
+  # reachable from the laptop at localhost:30080. In a cloud cluster you'd use
+  # ClusterIP behind an Ingress or a LoadBalancer Service instead.
+  type: NodePort
+  selector: {app: noc-copilot-api}
+  ports:
+    - port: 80            # Service port inside the cluster: http://noc-copilot-api.noc-copilot
+      targetPort: 8000    # container port
+      nodePort: 30080     # laptop access

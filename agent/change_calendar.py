@@ -61,3 +61,8 @@ class ChangeCalendar:
         ]
         Path(path).write_text(json.dumps(windows, indent=1))
         return Path(path)
+
+
+if __name__ == "__main__":  # python -m agent.change_calendar
+    out = ChangeCalendar.build_from_telemetry(pd.read_parquet(ROOT / "data/raw/telemetry.parquet"))
+    print(f"Wrote {len(json.loads(out.read_text()))} change windows -> {out}")
